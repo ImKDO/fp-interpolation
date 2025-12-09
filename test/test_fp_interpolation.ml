@@ -1,147 +1,131 @@
 open Fp_interpolation
+open Methods
 
 module Algo = Methods.Algorithm
-module Runner = Methods.Runner
 module Dataset = Methods.Dataset
-
-type test = { name : string; run : unit -> unit }
+module Runner = Methods.Runner
+module Point = Methods.Point
 
 let float_equal ?(eps = 1e-9) a b = Float.abs (a -. b) <= eps
+let float_pp fmt v = Format.fprintf fmt "%.12g" v
+let float_testable = Alcotest.testable float_pp (float_equal ~eps:1e-9)
 
-let assert_option_some name = function
-  | Some v -> v
-  | None -> failwith (name ^ ": expected Some, got None")
+let point_pp fmt p = Format.fprintf fmt "(%g, %g)" p.x p.y
+let point_equal a b = float_equal a.x b.x && float_equal a.y b.y
+let point_testable = Alcotest.testable point_pp point_equal
+let option_point_testable = Alcotest.option point_testable
 
-let assert_raises_invalid_argument name f =
-  try
-    f ();
-    failwith (name ^ ": expected Invalid_argument, but no exception was raised")
-  with
-  | Invalid_argument _ -> ()
-  | exn ->
-      failwith
-        (Printf.sprintf "%s: expected Invalid_argument, got %s" name
-           (Printexc.to_string exn))
+let expect_invalid_argument label f =
+  match f () with
+  | () -> Alcotest.failf "%s: expected Invalid_argument" label
+  | exception Invalid_argument _ -> ()
+  | exception exn ->
+      Alcotest.failf "%s: expected Invalid_argument, got %s" label
+        (Printexc.to_string exn)
 
-let assert_dataset_parsing () =
-  let check line expected_x expected_y =
-    let point =
-      Dataset.parse_line line |> assert_option_some ("parse " ^ line)
-    in
-    if not (float_equal point.x expected_x) then
-      failwith
-        (Printf.sprintf "parse %s: expected x=%g, got %g" line expected_x point.x);
+let expect_parse_error label f =
+  match f () with
+  | _ -> Alcotest.failf "%s: expected Dataset.Parse_error" label
+  | exception Dataset.Parse_error _ -> ()
+  | exception exn ->
+      Alcotest.failf "%s: expected Dataset.Parse_error, got %s" label
+        (Printexc.to_string exn)
 
-    if not (float_equal point.y expected_y) then
-      failwith
-        (Printf.sprintf "parse %s: expected y=%g, got %g" line expected_y
-           point.y)
-  in
-  check "0 1" 0. 1.;
-  check "  2.5\t3.5 " 2.5 3.5;
-  check "4,5" 4. 5.;
-  check "6;7" 6. 7.;
-  (match Dataset.parse_line "   " with
-  | None -> ()
-  | Some _ -> failwith "blank line should be ignored");
-  (try
-     ignore (Dataset.parse_line "oops");
-     failwith "parse_line should reject malformed input"
-   with
-   | Dataset.Parse_error _ -> ()
-   | exn ->
-       failwith
-         (Printf.sprintf "parse_line raised unexpected exception: %s"
-            (Printexc.to_string exn)))
-
-let assert_dataset_ordering () =
-  let open Methods in
-  let p1 = { x = 0.; y = 0. } in
-  let p2 = { x = 1.; y = 1. } in
-  Dataset.ensure_sorted p1 p2;
-  assert_raises_invalid_argument "ensure_sorted"
-    (fun () -> Dataset.ensure_sorted p2 p1)
-
-let assert_linear_interpolation () =
-  let open Methods in
-  let points = [ { x = 0.; y = 0. }; { x = 4.; y = 8. } ] in
-  let value =
-    Algo.compute_with_list Algo.Linear points 1.5
-  in
-  if not (float_equal value 3.) then
-    failwith
-      (Printf.sprintf "linear interpolation: expected 3, got %g" value)
-
-let assert_newton_interpolation () =
-  (* Interpolate f(x) = x^2 + 1 using 3-point Newton polynomial *)
-  let open Methods in
-  let points =
-    [ { x = 0.; y = 1. }
-    ; { x = 1.; y = 2. }
-    ; { x = 2.; y = 5. }
+let dataset_parses_valid () =
+  let cases =
+    [ "0 1", Point.make 0. 1.
+    ; "  2.5\t3.5 ", Point.make 2.5 3.5
+    ; "4,5", Point.make 4. 5.
+    ; "6;7", Point.make 6. 7.
     ]
   in
-  let value =
-    Algo.compute_with_list (Algo.Newton 3) points 1.5
+  List.iter
+    (fun (line, expected) ->
+      let actual =
+        match Dataset.parse_line line with
+        | Some point -> point
+        | None -> Alcotest.failf "line %S produced None" line
+      in
+      Alcotest.check point_testable (Printf.sprintf "parsed %S" line) expected
+        actual)
+    cases
+
+let dataset_ignores_blank_lines () =
+  Alcotest.check option_point_testable "blank lines are ignored" None
+    (Dataset.parse_line "   ")
+
+let dataset_rejects_malformed_lines () =
+  expect_parse_error "malformed dataset row" (fun () ->
+      ignore (Dataset.parse_line "oops"))
+
+let dataset_enforces_ordering () =
+  let p0 = Point.make 0. 0. in
+  let p1 = Point.make 1. 1. in
+  Dataset.ensure_sorted p0 p1;
+  expect_invalid_argument "unsorted dataset" (fun () ->
+      Dataset.ensure_sorted p1 p0)
+
+let linear_interpolation () =
+  let points = [ Point.make 0. 0.; Point.make 4. 8. ] in
+  let actual = Algo.compute_with_list Algo.Linear points 1.5 in
+  Alcotest.check float_testable "linear interpolation" 3. actual
+
+let newton_interpolation () =
+  let points =
+    [ Point.make 0. 1.
+    ; Point.make 1. 2.
+    ; Point.make 2. 5.
+    ]
   in
+  let actual = Algo.compute_with_list (Algo.Newton 3) points 1.5 in
   let expected = (1.5 *. 1.5) +. 1. in
-  if not (float_equal value expected) then
-    failwith
-      (Printf.sprintf "newton interpolation: expected %g, got %g" expected
-         value)
+  Alcotest.check float_testable "newton interpolation" expected actual
 
-let assert_runner_stream () =
-  let open Methods in
+let runner_streaming () =
   let runner = Runner.create Algo.Linear ~step:0.5 in
-  let p0 = { x = 0.; y = 0. } in
-  let p1 = { x = 1.; y = 1. } in
-  let p2 = { x = 2.; y = 2. } in
+  let p0 = Point.make 0. 0. in
+  let p1 = Point.make 1. 1. in
+  let p2 = Point.make 2. 2. in
   let outputs, runner = Runner.feed runner p0 in
-  if outputs <> [] then failwith "runner: expected no output after first point";
+  Alcotest.check (Alcotest.list point_testable)
+    "no output until enough points" [] outputs;
   let outputs, runner = Runner.feed runner p1 in
-  let expected1 =
-    [ { x = 0.; y = 0. }; { x = 0.5; y = 0.5 }; { x = 1.; y = 1. } ]
+  let expected_chunk1 =
+    [ Point.make 0. 0.
+    ; Point.make 0.5 0.5
+    ; Point.make 1. 1.
+    ]
   in
-  let compare_points a b =
-    float_equal a.x b.x && float_equal a.y b.y
-  in
-  let assert_points label actual expected =
-    if List.length actual <> List.length expected then
-      failwith
-        (Printf.sprintf "%s: expected %d points, got %d" label
-           (List.length expected) (List.length actual));
-    List.iter2
-      (fun a b ->
-        if not (compare_points a b) then
-          failwith
-            (Printf.sprintf "%s: expected (%.2f, %.2f), got (%.2f, %.2f)"
-               label b.x b.y a.x a.y))
-      actual expected
-  in
-  assert_points "runner chunk 1" outputs expected1;
+  Alcotest.check (Alcotest.list point_testable) "first chunk"
+    expected_chunk1 outputs;
   let outputs, _runner = Runner.feed runner p2 in
-  let expected2 =
-    [ { x = 1.5; y = 1.5 }; { x = 2.; y = 2. } ]
+  let expected_chunk2 =
+    [ Point.make 1.5 1.5
+    ; Point.make 2. 2.
+    ]
   in
-  assert_points "runner chunk 2" outputs expected2
+  Alcotest.check (Alcotest.list point_testable) "second chunk"
+    expected_chunk2 outputs
 
-let tests =
-  [ { name = "dataset parsing"; run = assert_dataset_parsing }
-  ; { name = "dataset ordering"; run = assert_dataset_ordering }
-  ; { name = "linear interpolation"; run = assert_linear_interpolation }
-  ; { name = "newton interpolation"; run = assert_newton_interpolation }
-  ; { name = "runner streaming"; run = assert_runner_stream }
+let dataset_tests =
+  [ Alcotest.test_case "parses valid lines" `Quick dataset_parses_valid
+  ; Alcotest.test_case "ignores blank lines" `Quick dataset_ignores_blank_lines
+  ; Alcotest.test_case "rejects malformed lines" `Quick
+      dataset_rejects_malformed_lines
+  ; Alcotest.test_case "enforces ordering" `Quick dataset_enforces_ordering
   ]
 
+let interpolation_tests =
+  [ Alcotest.test_case "linear" `Quick linear_interpolation
+  ; Alcotest.test_case "newton" `Quick newton_interpolation
+  ]
+
+let runner_tests =
+  [ Alcotest.test_case "streaming" `Quick runner_streaming ]
+
 let () =
-  List.iter
-    (fun test ->
-      try
-        test.run ();
-        Printf.printf "✔ %s\n%!" test.name
-      with
-      | exn ->
-          Printf.eprintf "✖ %s: %s\n%!" test.name (Printexc.to_string exn);
-          exit 1)
-    tests;
-  Printf.printf "\nAll %d tests passed.\n%!" (List.length tests)
+  Alcotest.run "fp-interpolation"
+    [ "Dataset", dataset_tests
+    ; "Interpolation", interpolation_tests
+    ; "Runner", runner_tests
+    ]
