@@ -1,1 +1,1 @@
-Fp_interpolation.Io.start;
+let () = Fp_interpolation.Io.run ()
