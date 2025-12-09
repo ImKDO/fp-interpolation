@@ -1,0 +1,4 @@
+(executable
+ (public_name fp-interpolation)
+ (name main)
+ (libraries fp_interpolation))
